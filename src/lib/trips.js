@@ -3,24 +3,33 @@ import { supabase } from './supabase'
 const tripSelect = `
   id,
   title,
+  subtitle,
   start_date,
   end_date,
   cover_color,
-  tagline,
-  cancelled,
+  cover_image_url,
+  status,
+  memo,
   created_at,
-  trip_destinations ( id, name, sort_order ),
-  trip_members ( id, name, is_owner, sort_order )
+  updated_at,
+  trip_on_trip_destinations ( id, city, country, sort_order ),
+  trip_on_trip_members ( id, name, is_me, created_at )
 `
 
 function toAppTrip(row) {
-  const destinations = [...(row.trip_destinations || [])]
-    .sort((a, b) => a.sort_order - b.sort_order)
-    .map((item) => item.name)
+  const destinations = [...(row.trip_on_trip_destinations || [])]
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+    .map((item) =>
+      item.country ? `${item.country} ${item.city}` : item.city
+    )
 
-  const companions = [...(row.trip_members || [])]
-    .filter((item) => !item.is_owner)
-    .sort((a, b) => a.sort_order - b.sort_order)
+  const companions = [...(row.trip_on_trip_members || [])]
+    .filter((item) => !item.is_me)
+    .sort((a, b) =>
+      String(a.created_at || '').localeCompare(
+        String(b.created_at || '')
+      )
+    )
     .map((item) => item.name)
 
   return {
@@ -30,45 +39,47 @@ function toAppTrip(row) {
     startDate: row.start_date,
     endDate: row.end_date,
     companions,
-    coverColor: row.cover_color,
-    tagline: row.tagline || '',
-    cancelled: row.cancelled || false,
+    coverColor: row.cover_color || '#CFE8FF',
+    tagline: row.subtitle || '',
+    cancelled: row.status === 'cancelled',
     createdAt: row.created_at,
   }
 }
 
 export async function fetchTrips() {
   const { data, error } = await supabase
-    .from('trips')
+    .from('trip_on_trips')
     .select(tripSelect)
     .order('created_at', { ascending: false })
 
   if (error) throw error
+
   return (data || []).map(toAppTrip)
 }
 
 async function fetchTrip(id) {
   const { data, error } = await supabase
-    .from('trips')
+    .from('trip_on_trips')
     .select(tripSelect)
     .eq('id', id)
     .single()
 
   if (error) throw error
+
   return toAppTrip(data)
 }
 
 export async function createTripRecord(trip, userId) {
   const { data: created, error } = await supabase
-    .from('trips')
+    .from('trip_on_trips')
     .insert({
-      user_id: userId,
+      owner_id: userId,
       title: trip.title,
+      subtitle: trip.tagline || null,
       start_date: trip.startDate || null,
       end_date: trip.endDate || null,
-      cover_color: trip.coverColor,
-      tagline: trip.tagline || null,
-      cancelled: false,
+      cover_color: trip.coverColor || '#CFE8FF',
+      status: trip.cancelled ? 'cancelled' : 'active',
     })
     .select('id')
     .single()
@@ -76,27 +87,43 @@ export async function createTripRecord(trip, userId) {
   if (error) throw error
 
   const tripId = created.id
-  const destinations = trip.destinations.map((name, index) => ({
-    trip_id: tripId,
-    name,
-    sort_order: index,
-  }))
+
+  const destinations = (trip.destinations || []).map(
+    (name, index) => ({
+      owner_id: userId,
+      trip_id: tripId,
+      city: name,
+      sort_order: index,
+    })
+  )
+
   const members = [
-    { trip_id: tripId, name: '나', is_owner: true, sort_order: 0 },
-    ...trip.companions.map((name, index) => ({
+    {
+      owner_id: userId,
+      trip_id: tripId,
+      name: '나',
+      is_me: true,
+    },
+    ...(trip.companions || []).map((name) => ({
+      owner_id: userId,
       trip_id: tripId,
       name,
-      is_owner: false,
-      sort_order: index + 1,
+      is_me: false,
     })),
   ]
 
   if (destinations.length) {
-    const { error: destinationError } = await supabase.from('trip_destinations').insert(destinations)
+    const { error: destinationError } = await supabase
+      .from('trip_on_trip_destinations')
+      .insert(destinations)
+
     if (destinationError) throw destinationError
   }
 
-  const { error: memberError } = await supabase.from('trip_members').insert(members)
+  const { error: memberError } = await supabase
+    .from('trip_on_trip_members')
+    .insert(members)
+
   if (memberError) throw memberError
 
   return fetchTrip(tripId)
@@ -104,13 +131,14 @@ export async function createTripRecord(trip, userId) {
 
 export async function updateTripRecord(trip) {
   const { error } = await supabase
-    .from('trips')
+    .from('trip_on_trips')
     .update({
       title: trip.title,
+      subtitle: trip.tagline || null,
       start_date: trip.startDate || null,
       end_date: trip.endDate || null,
-      cover_color: trip.coverColor,
-      tagline: trip.tagline || null,
+      cover_color: trip.coverColor || '#CFE8FF',
+      status: trip.cancelled ? 'cancelled' : 'active',
       updated_at: new Date().toISOString(),
     })
     .eq('id', trip.id)
@@ -118,34 +146,49 @@ export async function updateTripRecord(trip) {
   if (error) throw error
 
   const { error: deleteDestinationsError } = await supabase
-    .from('trip_destinations')
+    .from('trip_on_trip_destinations')
     .delete()
     .eq('trip_id', trip.id)
-  if (deleteDestinationsError) throw deleteDestinationsError
 
-  if (trip.destinations.length) {
+  if (deleteDestinationsError) {
+    throw deleteDestinationsError
+  }
+
+  if ((trip.destinations || []).length) {
     const { error: destinationError } = await supabase
-      .from('trip_destinations')
-      .insert(trip.destinations.map((name, index) => ({ trip_id: trip.id, name, sort_order: index })))
+      .from('trip_on_trip_destinations')
+      .insert(
+        trip.destinations.map((name, index) => ({
+          trip_id: trip.id,
+          city: name,
+          sort_order: index,
+        }))
+      )
+
     if (destinationError) throw destinationError
   }
 
   const { error: deleteMembersError } = await supabase
-    .from('trip_members')
+    .from('trip_on_trip_members')
     .delete()
     .eq('trip_id', trip.id)
-    .eq('is_owner', false)
-  if (deleteMembersError) throw deleteMembersError
+    .eq('is_me', false)
 
-  if (trip.companions.length) {
+  if (deleteMembersError) {
+    throw deleteMembersError
+  }
+
+  if ((trip.companions || []).length) {
     const { error: memberError } = await supabase
-      .from('trip_members')
-      .insert(trip.companions.map((name, index) => ({
-        trip_id: trip.id,
-        name,
-        is_owner: false,
-        sort_order: index + 1,
-      })))
+      .from('trip_on_trip_members')
+      .insert(
+        trip.companions.map((name) => ({
+          trip_id: trip.id,
+          name,
+          is_me: false,
+        }))
+      )
+
     if (memberError) throw memberError
   }
 
