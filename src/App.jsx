@@ -621,6 +621,27 @@ function App() {
     setIncomingShareTarget(null)
   }
 
+
+  // ORDINARY may open a specific journey, but only a trip returned by this user's
+  // authenticated TRIP:ON list can be opened. Do not trust a UUID from a URL as auth.
+  useEffect(() => {
+    if (remoteMode && (!authReady || !session || loading)) return
+    const params = new URLSearchParams(window.location.search)
+    const requestedId = params.get('open_trip')
+    if (!requestedId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestedId)) return
+    if (!trips.some((trip) => trip.id === requestedId)) return
+    params.delete('open_trip')
+    const cleanQuery = params.toString()
+    const cleanUrl = window.location.pathname + (cleanQuery ? '?' + cleanQuery : '') + (window.location.hash || '')
+    history.replaceState({
+      ...(history.state && typeof history.state === 'object' ? history.state : {}),
+      tripOnApp: true, tripOnLayer: 'trip', tripOnTab: 'trips',
+      tripOnTripId: requestedId, tripOnSheet: undefined,
+    }, '', cleanUrl)
+    setTab('trips')
+    setSelectedTripId(requestedId)
+  }, [remoteMode, authReady, session, loading, trips])
+
   const selectedTrip = trips.find((t) => t.id === selectedTripId)
 
   const saveTrip = async (draft) => {
